@@ -1,0 +1,115 @@
+name: Custom Hauser image
+
+on:
+  push:
+    branches: [custom]
+    tags: ['custom-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    env:
+      CI: 'true'
+      TZ: Europe/Berlin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: app
+      - run: ./scripts/verify-release-metadata.sh
+      - run: ./scripts/verify-license-boundary.sh
+      - run: npm run build
+        working-directory: app
+      - run: npm test -- --maxWorkers=1
+        working-directory: app
+      - run: npm run check
+        working-directory: app
+      - run: npm run build:demo
+        working-directory: app
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/custom-v')
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate custom release and source
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./app/package.json").version')"
+          prefix="custom-v${version}-"
+          [[ "$GITHUB_REF_NAME" == "$prefix"* ]]
+          number="${GITHUB_REF_NAME#"$prefix"}"
+          [[ "$number" =~ ^[1-9][0-9]*$ ]]
+          git fetch origin custom
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/custom
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "repository=$repository"
+            echo "source_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}"
+            echo "source_date_epoch=$(git show -s --format=%ct HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          if docker manifest inspect "${repository}:${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo 'This custom image tag already exists. Use a new numbered tag.' >&2
+            exit 1
+          fi
+      - name: Build the custom amd64 image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ steps.image.outputs.repository }}:${{ github.ref_name }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.image.outputs.source_date_epoch }}
+            HAUSER_VERSION=${{ github.ref_name }}
+            HAUSER_REVISION=${{ github.sha }}
+            HAUSER_SOURCE_URL=${{ steps.image.outputs.source_url }}
+            HAUSER_RELEASE=1
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+      - name: Verify the container before publishing
+        env:
+          HAUSER_IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+        run: |
+          ./scripts/verify-container.sh "$GITHUB_REF_NAME"
+      - name: Publish and record the exact deployment image
+        env:
+          CUSTOM_REPOSITORY: ${{ steps.image.outputs.repository }}
+        run: |
+          set -euo pipefail
+          docker push "${CUSTOM_REPOSITORY}:${GITHUB_REF_NAME}"
+          digest="$(docker buildx imagetools inspect "${CUSTOM_REPOSITORY}:${GITHUB_REF_NAME}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+          printf 'Deployment image: `%s@%s`\n' "$CUSTOM_REPOSITORY" "$digest" >> "$GITHUB_STEP_SUMMARY"

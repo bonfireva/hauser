@@ -1,4 +1,6 @@
 .DS_Store
+# Local generated images and connection helpers; never publish household photos.
+output/
 node_modules/
 dist/
 dist-demo/
