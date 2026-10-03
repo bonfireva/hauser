@@ -72,7 +72,8 @@
     return lights.every((device) => (mergedDevice(room?.id ?? '', device) as LightValue | undefined)?.on !== true);
   });
   const allAssignedLightsOff = $derived(simulation.lightsOff ?? roomLightsOff);
-  const showImmersion = $derived(appState.heroSun?.day === false && !allAssignedLightsOff);
+  // Placed lights follow device state in daylight as well as at night.
+  const showImmersion = $derived(!allAssignedLightsOff);
   /* Trübes Wetter (Paket 13): Hat das Bildset eine trübe Fassung, zeigt die
      Bühne sie bei Regen und Schnee statt des Sonnenbildes — dann trägt sie das
      Wetter im Fenster, und beides zusammen ergibt einen Blick nach draußen.
